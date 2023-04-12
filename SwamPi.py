@@ -92,7 +92,7 @@ def sendCmd():
     if switch[0] == 1 and switch[1] == 1: #Disable running Low and High at the same time
         switch[1] = 0
     if switch[0] or switch[1]:
-        if running = 0:
+        if running == 0:
             startTime = time.time()
     else:
         if running != 0:
