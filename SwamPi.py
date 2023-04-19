@@ -1,13 +1,19 @@
 import time
 import rpyc
 import sqlite3
+import logging
+from threading import Thread
 
 ####Settings
-boardType = 2 #1 = Raspberrypi; 2 = Le Potato
-CtrlMethod = 2 #1: masterstat; 2: Relay Board; NOTE: Not yet able to run masterstat with Le Potato
-PreWet = 0 #time in seconds to prewet pads before starting pump
-postWet = 0
+boardType = 1 #1 = Raspberrypi; 2 = Le Potato
+CtrlMethod = 1 #1: masterstat; 2: Relay Board; NOTE: Not yet able to run masterstat with Le Potato
+PreWet = 75 #time in seconds to prewet pads before starting pump
+postWet = 75
 loopTime = 20 #time in seconds to wait before rechecking for thermostat control
+
+purgePumpEnable = 1 #1 or 0 if using purge pump
+purgePumpFreq = 6 #amount of runtime in hours that elapses between purge pump runs
+purgePumpRunTime = 4 #amount of time in minutes purge pump runs during cycle
 
 ####Initialize system parameters, Don't Change
 serverMode = 0; # 0 = off; 1 = auto; 2 = override controls that auto and manual cannot run at the same time
@@ -15,10 +21,11 @@ switch = [0,0,0,0]
 running = 0
 runTime = 0
 startTime = 0
+purging = 0
 
 if boardType == 1:
-    GPIO.setmode(GPIO.BCM)
     import RPi.GPIO as GPIO
+    GPIO.setmode(GPIO.BCM)
 elif boardType == 2:
     import LePotatoPi.GPIO.GPIO as GPIO
 
@@ -35,7 +42,8 @@ if CtrlMethod == 1:
     import pigpio
     pi = pigpio.pi()
     pi.wave_tx_stop()
-    pin = 16
+    pin = 23
+    GPIO.setwarnings(False)
     GPIO.setup(pin,GPIO.OUT)
     def control(switches):
         totalOn = sum(switches)
@@ -84,11 +92,12 @@ elif CtrlMethod == 2:
         GPIO.output(21, switches[2]) #PurgePump
         GPIO.output(20, switches[3])
    
-print("setup Complete")
+#print("setup Complete")
    
 class ServerService(rpyc.Service):
     def exposed_manual(self,fanHi,fanLo,purgePump,pump):
         global serverMode
+        global running
         serverMode = 2
         toggle = [fanHi,fanLo,purgePump,pump].index(1)
         if switch[toggle] == 1:
@@ -96,23 +105,28 @@ class ServerService(rpyc.Service):
         else:
             switch[toggle] = 1
         sendCmd()
-        
-        print(switch)
+        if switch[3]:
+            if switch[0]:
+                running = 2
+            elif switch[1]:
+                running = 1
+        else: running = 0
+        logging.info(["Manual Override, switch = ", switch])
     def exposed_auto(self):
         global serverMode
         serverMode = 1
         global running #0 = off; 1 = coolLo; 2 = coolHi
-        global runTime
         global switch
+        return 0
         while serverMode == 1:
             nestcmd = [GPIO.input(pinCoolHi),GPIO.input(pinCoolLo),GPIO.input(pinFan)]
-            print("reading", nestcmd, running)
+            #print("reading", nestcmd, running)
+            logging.debug(["reading ; nest cmd = ", nestcmd,"running = ", running])
             if running == 0:
                 if nestcmd[1] == 1 or nestcmd[0] == 1:
                     switch = ([0,0,0,1])
                     sendCmd()
                     time.sleep(PreWet)
-                    #startTime = time.time()
                     if nestcmd[0] == 1: #High
                         switch = ([1,0,0,1])
                         sendCmd()
@@ -123,14 +137,13 @@ class ServerService(rpyc.Service):
                         running = 1                    
             elif running != 0:
                 if nestcmd[1] == 0 and nestcmd[0] == 0: #was running last loop but not anymore
-                    print("shutting down")
+                    #print("shutting down")
                     switch = ([0,0,0,1])
                     sendCmd()
-                    print("and again")
+                    #print("and again")
                     time.sleep(postWet)
                     switch = ([0,0,0,0])
                     sendCmd()
-                    startTime = 0
                     running = 0
                 if (nestcmd[1] == 1 or nestcmd[0] == 1):
                     if nestcmd[0] == 1 and running == 1: #Changing to High
@@ -143,6 +156,7 @@ class ServerService(rpyc.Service):
                         running = 1
             time.sleep(loopTime)
     def exposed_getSwitch(self):
+        global switch
         return switch
     
 def sendCmd():
@@ -150,18 +164,50 @@ def sendCmd():
     global running
     global startTime
     global runTime
+    global purging
     if switch[0] == 1 and switch[1] == 1: #Disable running Low and High at the same time
         switch[1] = 0
     if switch[0] or switch[1]:
         if running == 0:
             startTime = time.time()
+        else:
+            runTime = runTime + time.time() - startTime
     else:
         if running != 0:
             runTime = runTime + time.time() - startTime
-    print("running control ",switch,running)
+    if purging == 1: switch[2] = 1 #in case sendCmd() is called during purging
+    #print("running control ",switch,running)
+    logging.info(["Sending Command, switch = ",switch])
     control(switch)
     
+def runPurge():
+    global purgePumpFreq
+    global purgePumpRunTime
+    global runTime
+    global purging
+    while True:
+        if runTime > purgePumpFreq*3600:
+            global switch
+            logging.info("Starting Purge Cycle")
+            purging = 1
+            switch[2] = 1
+            sendCmd()
+            time.sleep(purgePumpRunTime*60)
+            switch[2] = 0
+            purging = 0
+            sendCmd()
+            runTime = 0
+        time.sleep(60*10)
+    
+logging.basicConfig(filename='/home/pi/SwamPi/log.log',
+                    filemode='a',
+                    format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
+                    datefmt='%m-%d-%y %H:%M:%S',
+                    level=logging.INFO)                       
+ 
+if purgePumpEnable == 1: Thread(target=runPurge).start()
  
 from rpyc.utils.server import ThreadedServer
 t = ThreadedServer(ServerService, port = 12345)
+logging.info("Setup Complete, starting Server")
 t.start()
