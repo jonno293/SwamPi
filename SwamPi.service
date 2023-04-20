@@ -1,0 +1,12 @@
+[Unit]
+Description=Swamp Cooler Control
+After=multi-user.target
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/SwamPi
+Restart=on-failure
+RestartSec = 5
+ExecStart=/usr/bin/python3 /home/pi/SwamPi/SwamPiServiceStart.py
+[Install]
+WantedBy=multi-user.target
